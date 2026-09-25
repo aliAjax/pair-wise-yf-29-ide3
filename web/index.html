@@ -1,4 +1,155 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>法律证据保管</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,input,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>法律证据保管与流转</h1><div class="panel"><select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select><input id="case" value="1"><button onclick="load()">生成保管报告</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/cases/${case.value}/report`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<style>
+body{font:15px system-ui;max-width:1080px;margin:28px auto;padding:0 16px;color:#222}
+select,input,button,textarea{padding:7px;margin:3px;font:inherit}
+textarea{width:100%;box-sizing:border-box}
+pre{background:#f5f5f5;padding:12px;white-space:pre-wrap;border-radius:6px;max-height:420px;overflow:auto}
+.panel{border:1px solid #bbb;padding:14px;border-radius:8px;margin-bottom:16px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.tabs button{border:1px solid #999;background:#eee;cursor:pointer;border-radius:6px}
+.tabs button.on{background:#234;font-weight:bold;color:#fff}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid #ccc;padding:5px 7px;text-align:left;vertical-align:top}
+.tag{padding:1px 7px;border-radius:10px;font-size:12px}
+.pending{background:#fdf0d5}.accepted{background:#d8f0dc}.rejected{background:#f8d7da}
+.muted{color:#777}.warn{color:#a05a00}
+</style></head>
+<body>
+<h1>法律证据保管与跨案引用</h1>
+<div class="panel bar">
+  身份
+  <select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select>
+  <span class="muted">（请求头 X-User-Id）</span>
+</div>
+<div class="tabs bar">
+  <button id="tab-report" class="on" onclick="show('report')">案件报告</button>
+  <button id="tab-apply" onclick="show('apply')">发起跨案引用</button>
+  <button id="tab-review" onclick="show('review')">受理核对</button>
+</div>
+
+<div id="pane-report" class="panel">
+  <div class="bar">案件 ID <input id="case" value="1" style="width:70px">
+    <button onclick="loadReport()">生成保管报告（含引用章节）</button></div>
+  <pre id="out-report">点击按钮生成报告。报告列出引用状态、退回原因以及受理后源证据是否发生变化。</pre>
+</div>
+
+<div id="pane-apply" class="panel" hidden>
+  <h3>目标案件填写引用申请</h3>
+  <div class="bar">源证据 ID <input id="ap-ev" style="width:80px" value="1">
+    目标案件 ID <input id="ap-case" style="width:80px" value="2"></div>
+  <textarea id="ap-purpose" rows="2" placeholder="引用用途（至少 5 字）"></textarea>
+  <div class="bar"><button onclick="applyRef()">提交引用申请</button></div>
+  <pre id="out-apply"></pre>
+  <h3>按引用单查看 / 退回后重提</h3>
+  <div class="bar">引用 ID <input id="ap-refid" style="width:80px">
+    <button onclick="getRef()">查看申请</button>
+    <button onclick="resubmitRef()">重新提交</button></div>
+</div>
+
+<div id="pane-review" class="panel" hidden>
+  <h3>受理人核对（源案件保管员）</h3>
+  <div class="bar">源案件 ID <input id="rv-case" style="width:80px" value="1">
+    <button onclick="loadIncoming()">加载待核对 / 全部来件</button></div>
+  <div id="incoming"></div>
+  <h3>本案件发起的引用（出件，可跟踪退回原因并重提）</h3>
+  <div class="bar">目标案件 ID <input id="rv-outcase" style="width:80px" value="2">
+    <button onclick="loadOutgoing()">加载出件</button></div>
+  <div id="outgoing"></div>
+  <pre id="out-review"></pre>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+function show(name){
+  for(const n of ["report","apply","review"]){
+    $("pane-"+n).hidden = n!==name;
+    $("tab-"+n).classList.toggle("on", n===name);
+  }
+}
+async function api(method, path, body){
+  const opt={method,headers:{"X-User-Id":$("user").value,"Content-Type":"application/json"}};
+  if(body) opt.body=JSON.stringify(body);
+  const r=await fetch(path,opt);
+  return {status:r.status, data:await r.json()};
+}
+function showJSON(el, res){ $(el).textContent = `HTTP ${res.status}\n`+JSON.stringify(res.data,null,2); }
+const STATUS_TEXT={pending:"待受理",accepted:"已受理",rejected:"已退回"};
+
+async function loadReport(){
+  showJSON("out-report", await api("GET",`/api/cases/${$("case").value}/report`));
+}
+async function applyRef(){
+  const res=await api("POST","/api/references",{
+    evidence_id:Number($("ap-ev").value), target_case_id:Number($("ap-case").value),
+    purpose:$("ap-purpose").value});
+  showJSON("out-apply",res);
+}
+async function getRef(){
+  const id=$("ap-refid").value;
+  showJSON("out-apply", await api("GET",`/api/references/${id}`));
+}
+async function resubmitRef(){
+  const id=$("ap-refid").value;
+  showJSON("out-apply", await api("POST",`/api/references/${id}/resubmit`,{purpose:$("ap-purpose").value}));
+}
+
+function refTable(rows, direction){
+  if(!rows.length) return '<p class="muted">暂无记录</p>';
+  let html='<table><tr><th>引用#</th><th>状态</th><th>源证据</th><th>对方案件</th><th>用途</th>'
+    +(direction==="incoming"?'<th>核对时变化</th><th>操作</th>':'<th>尝试</th><th>退回原因</th>')+'</tr>';
+  for(const r of rows){
+    const other = direction==="incoming"?r.target_case.case_number:r.source_case.case_number;
+    const changes=(r.verification_changes||r.source_changes||[]).join(", ");
+    html+=`<tr><td>${r.id}</td><td><span class="tag ${r.status}">${r.status_label||STATUS_TEXT[r.status]}</span></td>
+      <td>#${r.source_evidence.id} ${esc(r.source_evidence.label)}</td><td>${esc(other)}</td><td>${esc(r.purpose)}</td>`;
+    if(direction==="incoming"){
+      html+=`<td>${changes?`<span class="warn">${esc(changes)}</span>`:"<span class='muted'>无变化</span>"}</td><td>`;
+      if(r.status==="pending")
+        html+=`<button onclick="review(${r.id},'accept')">受理</button>
+               <button onclick="doReturn(${r.id})">退回</button>`;
+      else if(r.status==="accepted")
+        html+=`<button onclick="viewRefEv(${r.id})">只读查看元数据/保管链</button>`;
+      html+="</td>";
+    }else{
+      html+=`<td>第 ${r.attempt} 次</td><td>${esc(r.rejection_reason||"")}
+        ${r.source_changed?'<br><span class="warn">受理后源证据已变化: '+esc((r.source_changes||[]).join(","))+'</span>':""}
+        ${r.status==="rejected"?`<br><button onclick="quickResubmit(${r.id})">重提</button>`:""}
+        ${r.status==="accepted"?`<br><button onclick="viewRefEv(${r.id})">只读查看</button>`:""}</td>`;
+    }
+    html+="</tr>";
+  }
+  return html+"</table>";
+}
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+
+async function loadIncoming(){
+  const res=await api("GET",`/api/cases/${$("rv-case").value}/references?direction=incoming`);
+  if(res.status!==200){showJSON("out-review",res);$("incoming").innerHTML="";return;}
+  // 源案件视角下 _view 带 verification_changes；列表接口已返回该字段
+  $("incoming").innerHTML=refTable(res.data,"incoming");
+}
+async function loadOutgoing(){
+  const res=await api("GET",`/api/cases/${$("rv-outcase").value}/references?direction=outgoing`);
+  if(res.status!==200){showJSON("out-review",res);$("outgoing").innerHTML="";return;}
+  $("outgoing").innerHTML=refTable(res.data,"outgoing");
+}
+async function review(id,decision,reason){
+  reason = reason ?? "";
+  if(decision==="return"){ reason=prompt("退回原因（至少 3 字）"); if(reason===null)return; }
+  const res=await api("POST",`/api/references/${id}/review`,{decision,reason});
+  showJSON("out-review",res);
+  loadIncoming();
+}
+function doReturn(id){ return review(id,"return"); }
+async function viewRefEv(id){
+  showJSON("out-review", await api("GET",`/api/references/${id}/evidence`));
+}
+async function quickResubmit(id){
+  const purpose=prompt("重提的引用用途（至少 5 字）");
+  if(purpose===null)return;
+  const res=await api("POST",`/api/references/${id}/resubmit`,{purpose});
+  showJSON("out-review",res);
+  loadOutgoing();
+}
+</script>
+</body></html>
