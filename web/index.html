@@ -1,4 +1,103 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>法律证据保管</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,input,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>法律证据保管与流转</h1><div class="panel"><select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select><input id="case" value="1"><button onclick="load()">生成保管报告</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/cases/${case.value}/report`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<style>
+body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}
+select,input,button{padding:8px;margin:4px}
+pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}
+.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin-bottom:16px}
+h2{margin:0 0 10px;font-size:18px}h3{margin:12px 0 4px;font-size:15px}
+table{border-collapse:collapse;width:100%;margin-top:6px}
+td,th{border:1px solid #ccc;padding:6px;text-align:left;font-size:14px;vertical-align:top}
+.pending{color:#9a6a00}.accepted{color:#0a7a2f}.returned{color:#b00020}
+.hint{color:#666;font-size:13px}
+</style></head>
+<body>
+<h1>法律证据保管与流转</h1>
+<div class="panel">
+  演示身份：<select id="user"><option>custodian1</option><option>custodian2</option><option>analyst1</option><option>auditor1</option><option>outsider</option></select>
+</div>
+<div class="panel">
+  <h2>保管报告</h2>
+  案件 ID <input id="case" value="1" type="number" min="1">
+  <button onclick="loadReport()">生成保管报告</button>
+  <span class="hint">报告含跨案引用状态与退回原因</span>
+</div>
+<div class="panel">
+  <h2>申请跨案引用</h2>
+  证据 ID <input id="refEvidence" type="number" min="1">
+  目标案件 ID <input id="refCase" type="number" min="1">
+  用途 <input id="refPurpose" size="34" placeholder="并案侦查需要……（至少 5 字）">
+  <button onclick="createRef()">提交申请</button>
+  <div class="hint">申请提交时快照源证据状态；受理核对若发现移交、开箱或法律保留变化将被退回，需要重新提交。</div>
+</div>
+<div class="panel">
+  <h2>案件引用台账</h2>
+  案件 ID <input id="refListCase" type="number" min="1" value="1">
+  <button onclick="loadRefs()">刷新引用列表</button>
+  <div id="refs"></div>
+</div>
+<div class="panel">
+  <h2>查阅证据</h2>
+  证据 ID <input id="evId" type="number" min="1">
+  <button onclick="loadEvidence()">查看元数据与保管链</button>
+  <span class="hint">引用受理后目标案件为只读视图，不能开箱、移交或派生，也不返回证据内容。</span>
+</div>
+<pre id="out"></pre>
+<script>
+const $=id=>document.getElementById(id);
+const H=()=>({"X-User-Id":$("user").value,"Content-Type":"application/json"});
+async function api(method,url,body){
+  const r=await fetch(url,{method,headers:H(),body:body===undefined?undefined:JSON.stringify(body)});
+  const j=await r.json();
+  if(!r.ok)throw new Error(j.error?j.error.message:("HTTP "+r.status));
+  return j;
+}
+function show(x){$("out").textContent=typeof x==="string"?x:JSON.stringify(x,null,2)}
+async function loadReport(){
+  try{show(await api("GET",`/api/cases/${$("case").value}/report`))}catch(e){show("错误："+e.message)}
+}
+async function createRef(){
+  try{
+    show(await api("POST",`/api/evidence/${$("refEvidence").value}/references`,
+      {target_case_id:Number($("refCase").value),purpose:$("refPurpose").value}));
+  }catch(e){show("错误："+e.message)}
+}
+function refRow(r,incoming){
+  const drift=(r.drift&&r.drift.length)?`（待核对漂移：${r.drift.join("；")}）`:"";
+  let ops="";
+  if(incoming&&r.status==="pending")
+    ops=`<button onclick="reviewRef(${r.id},'accept')">受理</button><button onclick="reviewRef(${r.id},'return')">退回</button>`;
+  if(!incoming&&r.status==="returned")
+    ops=`<button onclick="resubmitRef(${r.id})">重提</button>`;
+  return `<tr><td>${r.id}</td><td>#${r.evidence_id} ${r.evidence_label||""}</td><td>${r.source_case_id} → ${r.target_case_id}</td>`
+    +`<td>${r.purpose}</td><td class="${r.status}">${r.status}</td><td>${r.return_reason||""}${drift}</td><td>${ops}</td></tr>`;
+}
+function refTable(title,list,incoming){
+  const rows=list.map(r=>refRow(r,incoming)).join("")||`<tr><td colspan="7">暂无记录</td></tr>`;
+  return `<h3>${title}</h3><table><tr><th>ID</th><th>证据</th><th>源案件→目标案件</th><th>用途</th>`
+    +`<th>状态</th><th>退回原因 / 漂移提示</th><th>操作</th></tr>${rows}</table>`;
+}
+async function loadRefs(){
+  try{
+    const d=await api("GET",`/api/cases/${$("refListCase").value}/references`);
+    $("refs").innerHTML=refTable("他案引用本案证据（本案保管员受理）",d.incoming,true)
+      +refTable("本案引用他案证据（申请人跟踪）",d.outgoing,false);
+  }catch(e){show("错误："+e.message)}
+}
+async function reviewRef(id,decision){
+  const note=decision==="return"?(prompt("请输入退回原因")||""):"";
+  try{
+    show(await api("POST",`/api/references/${id}/review`,{decision,note}));
+    await loadRefs();
+  }catch(e){show("错误："+e.message)}
+}
+async function resubmitRef(id){
+  const purpose=prompt("用途（留空沿用原申请）")||"";
+  try{
+    show(await api("POST",`/api/references/${id}/resubmit`,{purpose}));
+    await loadRefs();
+  }catch(e){show("错误："+e.message)}
+}
+async function loadEvidence(){
+  try{show(await api("GET",`/api/evidence/${$("evId").value}`))}catch(e){show("错误："+e.message)}
+}
+</script></body></html>

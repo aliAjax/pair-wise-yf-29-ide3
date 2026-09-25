@@ -8,24 +8,17 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import date, datetime, timezone
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from common import BusinessError, now
+from crossref import CrossReferenceService
+
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_DB = BASE_DIR / "custody.db"
 MEMBER_ROLES = {"custodian", "analyst", "auditor"}
-
-
-class BusinessError(Exception):
-    def __init__(self, message, status=400, code="bad_request"):
-        super().__init__(message)
-        self.message, self.status, self.code = message, status, code
-
-
-def now():
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class CustodyStore:
@@ -394,6 +387,7 @@ class CustodyStore:
 class Handler(BaseHTTPRequestHandler):
     server_version = "EvidenceCustody/1.0"
     def _store(self): return self.server.store  # type: ignore[attr-defined]
+    def _xref(self): return self.server.xref  # type: ignore[attr-defined]
     def _body(self):
         length = int(self.headers.get("Content-Length", "0"))
         try: data = json.loads(self.rfile.read(length) or b"{}")
@@ -419,12 +413,26 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts)==4 and parts[:2]==["api","cases"] and parts[3]=="evidence" and method=="POST":
             d=self._body(); return self._send(201,store.ingest_evidence(user,int(parts[2]),d.get("label",""),d.get("filename",""),d.get("content_b64",""),d.get("retention_until",""),d.get("custodian")))
         if len(parts)==4 and parts[:2]==["api","cases"] and parts[3]=="report" and method=="GET":
-            return self._send(200,store.report(user,int(parts[2])))
+            report=store.report(user,int(parts[2]))
+            report["references"]=self._xref().list_for_case(user,int(parts[2]))
+            return self._send(200,report)
+        if len(parts)==4 and parts[:2]==["api","cases"] and parts[3]=="references" and method=="GET":
+            return self._send(200,self._xref().list_for_case(user,int(parts[2])))
+        if len(parts)==4 and parts[:2]==["api","references"] and method=="POST":
+            d=self._body()
+            if parts[3]=="review": return self._send(200,self._xref().review(user,int(parts[2]),d.get("decision",""),d.get("note","")))
+            if parts[3]=="resubmit": return self._send(201,self._xref().resubmit(user,int(parts[2]),d.get("purpose")))
         if len(parts)>=3 and parts[:2]==["api","evidence"]:
             evidence_id=int(parts[2])
-            if len(parts)==3 and method=="GET": return self._send(200,store.get_evidence(user,evidence_id,bool(urlparse(self.path).query)))
+            if len(parts)==3 and method=="GET":
+                try:
+                    return self._send(200,store.get_evidence(user,evidence_id,bool(urlparse(self.path).query)))
+                except BusinessError as exc:
+                    if exc.status!=403: raise
+                    return self._send(200,self._xref().get_via_reference(user,evidence_id))
             if len(parts)==4 and method=="POST":
                 d=self._body()
+                if parts[3]=="references": return self._send(201,self._xref().create_request(user,evidence_id,d.get("target_case_id"),d.get("purpose","")))
                 if parts[3]=="transfer": return self._send(200,store.transfer(user,evidence_id,d.get("to_person",""),d.get("location",""),d.get("note","")))
                 if parts[3]=="open": return self._send(200,store.open_evidence(user,evidence_id,d.get("location",""),d.get("note","")))
                 if parts[3]=="derive": return self._send(201,store.derive(user,evidence_id,d.get("method",""),d.get("label",""),d.get("filename",""),d.get("content_b64","")))
@@ -444,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
 
 class CustodyServer(ThreadingHTTPServer):
     daemon_threads=True
-    def __init__(self,address,store): self.store=store; super().__init__(address,Handler)
+    def __init__(self,address,store,xref): self.store=store; self.xref=xref; super().__init__(address,Handler)
 
 
 def main():
@@ -452,9 +460,10 @@ def main():
     parser.add_argument("--db",default=str(DEFAULT_DB)); parser.add_argument("--port",type=int,default=8105)
     parser.add_argument("--init",action="store_true"); parser.add_argument("--seed",action="store_true")
     args=parser.parse_args(); store=CustodyStore(args.db); store.init_schema()
+    xref=CrossReferenceService(store); xref.init_schema()
     if args.seed: store.seed()
     if args.init or args.seed: print(f"数据库已初始化: {args.db}"); return
-    server=CustodyServer(("127.0.0.1",args.port),store); print(f"证据保管系统运行于 http://127.0.0.1:{args.port}")
+    server=CustodyServer(("127.0.0.1",args.port),store,xref); print(f"证据保管系统运行于 http://127.0.0.1:{args.port}")
     try: server.serve_forever()
     except KeyboardInterrupt: pass
     finally: server.server_close()
